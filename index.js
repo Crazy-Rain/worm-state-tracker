@@ -5,8 +5,7 @@
 // queue for both extracted changes AND file imports.
 // ============================================================
 
-import { extension_settings, getContext } from '../../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../script.js';
+import { getContext } from '../../../extensions.js';
 import {
   getToken, setToken, setGistForChat, getGistIdForChat,
   fetchGistFiles, updateGistFiles, createGist,
@@ -162,7 +161,7 @@ function renderNpcToText(npc) {
 // ═══════════════════════════════════════════════════════════════
 
 function getRecentMessageText() {
-  const ctx = SillyTavern?.getContext?.() || getContext();
+  const ctx = getContext();
   if (!ctx?.chat?.length) return '';
   return ctx.chat.slice(-SCAN_DEPTH).map(m => m.mes || '').join(' ').toLowerCase();
 }
@@ -207,7 +206,7 @@ function selectRelevantNpcs() {
 // ═══════════════════════════════════════════════════════════════
 
 function injectWorldState() {
-  const ctx = SillyTavern?.getContext?.() || getContext();
+  const ctx = getContext();
   if (!ctx?.setExtensionPrompt) return;
   const wsText  = renderWorldState();
   const arcText = renderArcEvents();
@@ -216,7 +215,7 @@ function injectWorldState() {
 }
 
 function injectNpcs() {
-  const ctx = SillyTavern?.getContext?.() || getContext();
+  const ctx = getContext();
   if (!ctx?.setExtensionPrompt) return;
   const selected = selectRelevantNpcs();
   if (!selected.length) {
@@ -301,7 +300,7 @@ async function pushToGist() {
 // ═══════════════════════════════════════════════════════════════
 
 async function onMessageReceived() {
-  const ctx = SillyTavern?.getContext?.() || getContext();
+  const ctx = getContext();
   const messages = ctx?.chat;
   if (!messages?.length) return;
   const lastMsg = messages[messages.length - 1];
@@ -1019,7 +1018,7 @@ function escapeHtml(str) {
 // ═══════════════════════════════════════════════════════════════
 
 function registerEventHooks() {
-  const ctx    = SillyTavern?.getContext?.() || getContext();
+  const ctx    = getContext();
   const events = ctx?.eventSource;
   if (!events) { console.warn('[WormTracker] No eventSource — hooks not registered'); return; }
 
@@ -1057,7 +1056,7 @@ jQuery(async () => {
   buildPanel();
   registerEventHooks();
 
-  const ctx = SillyTavern?.getContext?.() || getContext();
+  const ctx = getContext();
   if (ctx?.chatId) {
     currentChatId = ctx.chatId;
     const storedId = getGistIdForChat(ctx.chatId);
