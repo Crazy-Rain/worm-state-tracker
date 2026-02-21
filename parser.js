@@ -49,6 +49,12 @@ arc_events: Did any tracked canon event fire, get altered, or get skipped?
 new_npcs: Were any new named characters introduced not yet in the tracker?
   Format: [{ "display_name": "", "alias": "", "aliases": [], "faction": "", "first_appeared": "" }]
 
+npc_appearance: Did the narrative visually describe any NPC's physical appearance in a way that reveals or confirms concrete details?
+  Only propose if the narrative contains specific visual description (hair, eyes, height, build, clothing, face, marks).
+  Do NOT propose for vague references. Only concrete details actually described or confirmed in this response.
+  Format: { "npc_filename.json": { "hair": "...", "eyes": "...", "height": "...", "build": "...", "face": "...", "clothing_style": "...", "distinguishing_marks": "..." } }
+  Include ONLY fields actually described. Omit null/unknown fields entirely.
+
 npc_aliases: Did any NPC reveal, adopt, or lose a name or alias in this response?
   This includes: taking a new cape name, civilian name revealed, old villain name referenced, going by a different identity.
   Format: { "npc_filename.json": { "alias": "primary cape name", "aliases": ["all known names including old ones"] } }
