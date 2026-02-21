@@ -401,7 +401,7 @@ function buildActiveNpcContext() {
   }));
 }
 
-async function rescanHistory(count = 10) {
+async function rescanHistory(count = 10, forgeOnly = false) {
   if (isRescanning || isExtracting) {
     updateStatus('already scanning — please wait');
     return;
@@ -415,67 +415,81 @@ async function rescanHistory(count = 10) {
   const messages = ctx?.chat;
   if (!messages?.length) { updateStatus('no chat history found'); return; }
 
-  // Collect AI messages oldest→newest (state accumulates correctly), up to `count`
+  // Collect AI messages newest→oldest up to count, then reverse to oldest→newest
   const aiMessages = [];
   for (let i = messages.length - 1; i >= 0 && aiMessages.length < count; i--) {
     const msg = messages[i];
     if (!msg || msg.is_user) continue;
-    const raw   = msg.mes || '';
-    const clean = stripThinkingBlocks(raw);
-    if (clean) aiMessages.push({ raw, clean, idx: i });
+    const raw = msg.mes || '';
+    if (raw) aiMessages.push({ raw, idx: i });
   }
-  aiMessages.reverse(); // oldest first
+  aiMessages.reverse();
 
   if (!aiMessages.length) { updateStatus('no AI messages to scan'); return; }
 
   isRescanning = true;
   rescanAbort  = false;
   const scanBtn = document.getElementById('wt_rescan_btn');
-  if (scanBtn) { scanBtn.textContent = '⏹ Stop'; scanBtn.dataset.scanning = '1'; }
+  if (scanBtn) { scanBtn.textContent = '\u23f9 Stop'; scanBtn.dataset.scanning = '1'; }
 
-  // ── PASS 1: forge blocks — free, instant, no API calls ────
+  // ── PASS 1: forge blocks — zero API calls ─────────────────
   let forgeFound = 0;
-  const orphans  = [];   // messages with no forge block — need LLM pass
+  const orphans  = [];
 
-  updateStatus(`pass 1/2: scanning ${aiMessages.length} messages for forge blocks…`);
+  updateStatus('pass 1: scanning for forge blocks\u2026');
 
   for (const msg of aiMessages) {
+    if (rescanAbort) break;
     const forgeObj = extractForgeBlock(msg.raw);
     if (forgeObj) {
       const delta = normalizeForgeBlock(forgeObj, gistFiles);
       if (!deltaIsEmpty(delta)) { proposeDelta(delta); forgeFound++; }
-    } else {
-      orphans.push(msg);
+    } else if (!forgeOnly) {
+      // Only collect orphans that mention at least one known NPC by name/alias —
+      // skips pure atmosphere prose with no trackable characters
+      const lowerRaw = msg.raw.toLowerCase();
+      const hasNpc = allNpcFiles().some(npc => {
+        const candidates = [
+          npc.display_name, npc.alias,
+          ...(Array.isArray(npc.aliases) ? npc.aliases : [])
+        ].filter(Boolean);
+        return candidates.some(c => c && lowerRaw.includes(c.toLowerCase()));
+      });
+      if (hasNpc) orphans.push({ raw: msg.raw, clean: stripThinkingBlocks(msg.raw) });
     }
   }
 
-  updateStatus(`pass 1/2 done — ${forgeFound} forge block(s) found, ${orphans.length} message(s) without forge blocks`);
+  const forgeMsg = forgeFound ? `${forgeFound} forge block(s) queued` : 'no forge blocks found';
 
-  if (!orphans.length || rescanAbort) {
+  if (forgeOnly || !orphans.length || rescanAbort) {
     isRescanning = false;
-    if (scanBtn) { scanBtn.textContent = '🔍 Rescan History'; delete scanBtn.dataset.scanning; }
-    updateStatus(forgeFound
-      ? `rescan complete — ${forgeFound} change(s) queued (forge blocks only, no API calls needed)`
-      : 'rescan complete — no forge blocks found, no changes detected');
+    if (scanBtn) { scanBtn.textContent = '\ud83d\udd0d Rescan History'; delete scanBtn.dataset.scanning; }
+    const suffix = (orphans.length && !forgeOnly)
+      ? ` \u2014 ${orphans.length} message(s) lack forge blocks (LLM pass skipped)`
+      : '';
+    updateStatus(`rescan complete \u2014 ${forgeMsg}${suffix}`);
+    renderQueuePanel();
     return;
   }
 
-  // ── PASS 2: LLM extraction for orphaned messages ───────────
-  // These are messages the AI produced WITHOUT a forge block.
-  // Throttled — 4s between calls to avoid rate limits on local inference.
+  // ── PASS 2: ONE batched LLM call for all orphan messages ──
+  // All messages without forge blocks go into a single combined prompt.
+  // One API call instead of N — one rate-limit exposure total.
+  updateStatus(`pass 2: batching ${orphans.length} orphan message(s) into one LLM call\u2026`);
+
+  const separator  = '\n\n\u2501\u2501\u2501 [next message] \u2501\u2501\u2501\n\n';
+  const batchedText = orphans.map((m, i) =>
+    `[Message ${i + 1} of ${orphans.length}]\n${m.clean}`
+  ).join(separator);
+
   let llmFound = 0;
-  updateStatus(`pass 2/2: LLM extraction on ${orphans.length} message(s) without forge blocks…`);
+  let attempts = 0;
+  const MAX_ATTEMPTS = 3;
 
-  for (let i = 0; i < orphans.length; i++) {
-    if (rescanAbort) {
-      updateStatus(`scan stopped — ${forgeFound + llmFound} total change(s) queued`);
-      break;
-    }
-
-    updateStatus(`pass 2/2: LLM ${i + 1}/${orphans.length} (${4 - (i > 0 ? 0 : 0)}s between calls)…`);
-
+  while (attempts < MAX_ATTEMPTS && !rescanAbort) {
+    attempts++;
     try {
-      const prompt = buildExtractionPrompt(orphans[i].clean, {
+      const prompt = buildExtractionPrompt(batchedText, {
         world_state:  worldState(),
         master_index: masterIndex(),
         arc_events:   arcEvents(),
@@ -483,32 +497,38 @@ async function rescanHistory(count = 10) {
       });
       const raw   = await runExtractionCall(prompt);
       const delta = parseDelta(raw);
-      if (!deltaIsEmpty(delta)) { proposeDelta(delta); llmFound++; }
+      if (!deltaIsEmpty(delta)) { proposeDelta(delta); llmFound = 1; }
+      break;  // success
     } catch (err) {
-      console.error(`[WormTracker] LLM scan error on orphan ${i}:`, err);
-      const isRateLimit = err.message?.includes('429') || err.message?.toLowerCase().includes('too many');
-      if (isRateLimit) {
-        updateStatus(`rate limited — waiting 10s before continuing…`);
-        await new Promise(r => setTimeout(r, 10000));
-        i--; // retry same message
-        continue;
+      console.error(`[WormTracker] Batch LLM error (attempt ${attempts}):`, err);
+      const isRateLimit = err.message?.includes('429')
+        || err.message?.toLowerCase().includes('too many')
+        || err.message?.toLowerCase().includes('rate');
+      if (isRateLimit && attempts < MAX_ATTEMPTS) {
+        const waitSec = attempts * 8;  // 8s → 16s → 24s backoff
+        updateStatus(`rate limited \u2014 waiting ${waitSec}s before retry (${attempts}/${MAX_ATTEMPTS})\u2026`);
+        await new Promise(r => setTimeout(r, waitSec * 1000));
+      } else {
+        updateStatus(`LLM batch error: ${err.message}${attempts < MAX_ATTEMPTS ? ' \u2014 retrying\u2026' : ' \u2014 giving up'}`);
+        if (attempts >= MAX_ATTEMPTS) break;
       }
-      updateStatus(`LLM error (msg ${i + 1}): ${err.message} — skipping…`);
-    }
-
-    if (i < orphans.length - 1 && !rescanAbort) {
-      // 4s between LLM calls — more conservative than before for local inference
-      await new Promise(r => setTimeout(r, 4000));
     }
   }
 
   isRescanning = false;
-  if (scanBtn) { scanBtn.textContent = '🔍 Rescan History'; delete scanBtn.dataset.scanning; }
+  if (scanBtn) { scanBtn.textContent = '\ud83d\udd0d Rescan History'; delete scanBtn.dataset.scanning; }
+
   const total = forgeFound + llmFound;
-  updateStatus(total
-    ? `rescan complete — ${total} change(s) queued (${forgeFound} forge, ${llmFound} LLM)`
-    : 'rescan complete — no changes detected');
+  if (rescanAbort) {
+    updateStatus(`scan stopped \u2014 ${total} change(s) queued`);
+  } else {
+    updateStatus(total
+      ? `rescan complete \u2014 ${total} change(s) queued (${forgeFound} forge, ${llmFound ? '1 batch LLM call' : 'LLM: no new changes'})`
+      : 'rescan complete \u2014 no changes detected');
+  }
+  renderQueuePanel();
 }
+
 
 // ═══════════════════════════════════════════════════════════════
 // 6. APPROVE/DENY QUEUE — extracted deltas
@@ -1041,12 +1061,20 @@ function buildPanel() {
               title="How many previous AI messages to scan (1–50)">
             <span class="wt-label" style="margin-left:4px">messages</span>
           </div>
+          <div class="wt-row wt-row--inline" style="margin-top:4px;">
+            <input id="wt_forge_only" type="checkbox" style="width:auto;margin-right:6px;">
+            <label for="wt_forge_only" class="wt-label" style="cursor:pointer;"
+              title="Only parse forge blocks — no API calls. Fast and rate-limit free.">
+              Forge blocks only (no API calls)
+            </label>
+          </div>
           <div class="wt-actions">
             <button id="wt_rescan_btn" class="menu_button wt-btn wt-btn-neutral">🔍 Rescan History</button>
           </div>
           <p class="wt-import-hint">
-            Re-runs extraction on previous AI responses. Useful after API errors or accidental denials.
-            Sequential — waits between calls to avoid rate limits.
+            Re-scans previous AI responses for missed state changes. Pass 1 parses forge blocks directly
+            (zero API calls). Pass 2 batches all remaining messages into one LLM call — tick
+            "forge blocks only" to skip it entirely if you're still hitting rate limits.
           </p>
         </div>
 
@@ -1135,12 +1163,12 @@ function buildPanel() {
   panel.querySelector('#wt_rescan_btn').addEventListener('click', async () => {
     const btn = panel.querySelector('#wt_rescan_btn');
     if (btn.dataset.scanning) {
-      // Already scanning — this click stops it
       rescanAbort = true;
       return;
     }
-    const depth = parseInt(panel.querySelector('#wt_rescan_depth').value, 10) || 10;
-    await rescanHistory(depth);
+    const depth      = parseInt(panel.querySelector('#wt_rescan_depth').value, 10) || 10;
+    const forgeOnly  = panel.querySelector('#wt_forge_only')?.checked ?? false;
+    await rescanHistory(depth, forgeOnly);
   });
 
   // Bulk actions
