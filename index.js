@@ -12,8 +12,8 @@ import {
   scaffoldNpcFile, defaultIndex, defaultWorldState, defaultArcEvents
 } from './gist.js';
 import {
-  stripThinkingBlocks, buildExtractionPrompt,
-  runExtractionCall, parseDelta, deltaIsEmpty
+  stripThinkingBlocks, extractForgeBlock, normalizeForgeBlock,
+  buildExtractionPrompt, runExtractionCall, parseDelta, deltaIsEmpty
 } from './parser.js';
 
 // ── Constants ─────────────────────────────────────────────────
@@ -336,10 +336,25 @@ async function onMessageReceived() {
   const cleanText = stripThinkingBlocks(rawText);
   if (cleanText === lastMessageText || !cleanText) return;
   lastMessageText = cleanText;
-  if (!gistFiles['world_state.json'] || isExtracting) return;
+  if (!gistFiles['world_state.json'] || isExtracting || isRescanning) return;
 
   rebuildContextInjection();
 
+  // ── Forge-first: parse the ```forge``` block the AI already output ──
+  // Free, instant, zero API calls. Only fall back to LLM if no forge block.
+  const forgeObj = extractForgeBlock(rawText);
+  if (forgeObj) {
+    const delta = normalizeForgeBlock(forgeObj, gistFiles);
+    if (!deltaIsEmpty(delta)) {
+      proposeDelta(delta);
+      updateStatus('forge block parsed ✓');
+    } else {
+      updateStatus('idle ✓');
+    }
+    return;
+  }
+
+  // ── LLM fallback: no forge block found — ask the model ──
   isExtracting = true;
   updateStatus('extracting changes…');
   try {
@@ -375,6 +390,17 @@ async function onMessageReceived() {
 let isRescanning = false;
 let rescanAbort  = false;
 
+// ── helpers shared by both scan passes ────────────────────────
+function buildActiveNpcContext() {
+  return allNpcFiles().map(n => ({
+    file:          Object.entries(gistFiles).find(([, v]) => v === n)?.[0],
+    display_name:  n.display_name,
+    alias:         n.alias,
+    current_state: n.current_state,
+    knowledge:     n.knowledge
+  }));
+}
+
 async function rescanHistory(count = 10) {
   if (isRescanning || isExtracting) {
     updateStatus('already scanning — please wait');
@@ -389,68 +415,99 @@ async function rescanHistory(count = 10) {
   const messages = ctx?.chat;
   if (!messages?.length) { updateStatus('no chat history found'); return; }
 
-  // Collect AI messages in reverse order (newest first) up to `count`
+  // Collect AI messages oldest→newest (state accumulates correctly), up to `count`
   const aiMessages = [];
   for (let i = messages.length - 1; i >= 0 && aiMessages.length < count; i--) {
     const msg = messages[i];
     if (!msg || msg.is_user) continue;
-    const text = stripThinkingBlocks(msg.mes || '');
-    if (text) aiMessages.push({ text, idx: i });
+    const raw   = msg.mes || '';
+    const clean = stripThinkingBlocks(raw);
+    if (clean) aiMessages.push({ raw, clean, idx: i });
   }
+  aiMessages.reverse(); // oldest first
 
   if (!aiMessages.length) { updateStatus('no AI messages to scan'); return; }
-
-  // Reverse so we process oldest→newest (state builds correctly)
-  aiMessages.reverse();
 
   isRescanning = true;
   rescanAbort  = false;
   const scanBtn = document.getElementById('wt_rescan_btn');
   if (scanBtn) { scanBtn.textContent = '⏹ Stop'; scanBtn.dataset.scanning = '1'; }
 
-  let found = 0;
-  for (let i = 0; i < aiMessages.length; i++) {
+  // ── PASS 1: forge blocks — free, instant, no API calls ────
+  let forgeFound = 0;
+  const orphans  = [];   // messages with no forge block — need LLM pass
+
+  updateStatus(`pass 1/2: scanning ${aiMessages.length} messages for forge blocks…`);
+
+  for (const msg of aiMessages) {
+    const forgeObj = extractForgeBlock(msg.raw);
+    if (forgeObj) {
+      const delta = normalizeForgeBlock(forgeObj, gistFiles);
+      if (!deltaIsEmpty(delta)) { proposeDelta(delta); forgeFound++; }
+    } else {
+      orphans.push(msg);
+    }
+  }
+
+  updateStatus(`pass 1/2 done — ${forgeFound} forge block(s) found, ${orphans.length} message(s) without forge blocks`);
+
+  if (!orphans.length || rescanAbort) {
+    isRescanning = false;
+    if (scanBtn) { scanBtn.textContent = '🔍 Rescan History'; delete scanBtn.dataset.scanning; }
+    updateStatus(forgeFound
+      ? `rescan complete — ${forgeFound} change(s) queued (forge blocks only, no API calls needed)`
+      : 'rescan complete — no forge blocks found, no changes detected');
+    return;
+  }
+
+  // ── PASS 2: LLM extraction for orphaned messages ───────────
+  // These are messages the AI produced WITHOUT a forge block.
+  // Throttled — 4s between calls to avoid rate limits on local inference.
+  let llmFound = 0;
+  updateStatus(`pass 2/2: LLM extraction on ${orphans.length} message(s) without forge blocks…`);
+
+  for (let i = 0; i < orphans.length; i++) {
     if (rescanAbort) {
-      updateStatus(`rescan stopped at message ${i}/${aiMessages.length} — ${found} change(s) queued`);
+      updateStatus(`scan stopped — ${forgeFound + llmFound} total change(s) queued`);
       break;
     }
 
-    updateStatus(`scanning message ${i + 1}/${aiMessages.length}…`);
+    updateStatus(`pass 2/2: LLM ${i + 1}/${orphans.length} (${4 - (i > 0 ? 0 : 0)}s between calls)…`);
 
     try {
-      const prompt = buildExtractionPrompt(aiMessages[i].text, {
+      const prompt = buildExtractionPrompt(orphans[i].clean, {
         world_state:  worldState(),
         master_index: masterIndex(),
         arc_events:   arcEvents(),
-        active_npcs:  allNpcFiles().map(n => ({
-          file:          Object.entries(gistFiles).find(([, v]) => v === n)?.[0],
-          display_name:  n.display_name,
-          alias:         n.alias,
-          current_state: n.current_state,
-          knowledge:     n.knowledge
-        }))
+        active_npcs:  buildActiveNpcContext()
       });
       const raw   = await runExtractionCall(prompt);
       const delta = parseDelta(raw);
-      if (!deltaIsEmpty(delta)) { proposeDelta(delta); found++; }
+      if (!deltaIsEmpty(delta)) { proposeDelta(delta); llmFound++; }
     } catch (err) {
-      console.error(`[WormTracker] Rescan error on msg ${i}:`, err);
-      updateStatus(`scan error (msg ${i + 1}): ${err.message} — continuing…`);
+      console.error(`[WormTracker] LLM scan error on orphan ${i}:`, err);
+      const isRateLimit = err.message?.includes('429') || err.message?.toLowerCase().includes('too many');
+      if (isRateLimit) {
+        updateStatus(`rate limited — waiting 10s before continuing…`);
+        await new Promise(r => setTimeout(r, 10000));
+        i--; // retry same message
+        continue;
+      }
+      updateStatus(`LLM error (msg ${i + 1}): ${err.message} — skipping…`);
     }
 
-    // Delay between calls — avoids rate-limit / "too many responses" errors
-    if (i < aiMessages.length - 1 && !rescanAbort) {
-      await new Promise(r => setTimeout(r, 1800));
+    if (i < orphans.length - 1 && !rescanAbort) {
+      // 4s between LLM calls — more conservative than before for local inference
+      await new Promise(r => setTimeout(r, 4000));
     }
   }
 
   isRescanning = false;
   if (scanBtn) { scanBtn.textContent = '🔍 Rescan History'; delete scanBtn.dataset.scanning; }
-  if (!rescanAbort) {
-    updateStatus(found
-      ? `rescan complete — ${found} change(s) queued for review`
-      : 'rescan complete — no new changes detected');
-  }
+  const total = forgeFound + llmFound;
+  updateStatus(total
+    ? `rescan complete — ${total} change(s) queued (${forgeFound} forge, ${llmFound} LLM)`
+    : 'rescan complete — no changes detected');
 }
 
 // ═══════════════════════════════════════════════════════════════
