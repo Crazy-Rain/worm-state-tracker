@@ -399,6 +399,38 @@ function proposeDelta(delta) {
     }
   }
 
+  // NPC alias updates — cape name changes, identity reveals, new names adopted
+  if (delta.npc_aliases) {
+    for (const [file, aliasData] of Object.entries(delta.npc_aliases)) {
+      const npc  = gistFiles[file];
+      const name = npc?.display_name || file.replace(/npc_|\.json/g, '').replace(/_/g, ' ');
+      const oldAlias   = npc?.alias;
+      const oldAliases = npc?.aliases;
+      const newAlias   = aliasData.alias;
+      const newAliases = aliasData.aliases;
+
+      const changes = [];
+      if (newAlias && newAlias !== oldAlias)
+        changes.push(`primary name: ${oldAlias || '?'} → ${newAlias}`);
+      if (newAliases)
+        changes.push(`known names: [${(oldAliases || []).join(', ')}] → [${newAliases.join(', ')}]`);
+
+      if (!changes.length) continue;
+
+      newItems.push({
+        id: uid(), type: 'npc_aliases', npcFile: file,
+        description: `${name}: alias update — ${changes.join('; ')}`,
+        oldValue: { alias: oldAlias, aliases: oldAliases },
+        newValue: aliasData,
+        applyFn: () => {
+          if (!gistFiles[file]) gistFiles[file] = {};
+          if (newAlias)   gistFiles[file].alias   = newAlias;
+          if (newAliases) gistFiles[file].aliases  = newAliases;
+        }
+      });
+    }
+  }
+
   if (delta.arc_events) {
     for (const [evId, status] of Object.entries(delta.arc_events)) {
       newItems.push({
@@ -693,6 +725,7 @@ const TYPE_ICONS = {
   npc_knowledge:   '🧠',
   npc_relationship:'🤝',
   npc_state:       '💭',
+  npc_aliases:     '🏷️',
   arc_event:       '📖',
   world_state:     '🌆',
   divergence:      '⚡',
