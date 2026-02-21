@@ -1,7 +1,7 @@
 {
   "display_name": "Worm State Tracker",
-  "version": "0.1.0",
-  "description": "Tracks NPC knowledge states, canon events, and timeline divergence for Worm roleplay scenarios via GitHub Gist.",
+  "version": "0.4.0",
+  "description": "Live Gist-backed NPC and world state injection for Worm roleplay. Auto-selects relevant NPCs per scene. Surfaces detected state changes for approve/deny before writing back to Gist.",
   "author": "LO",
   "homePage": "",
   "requires_extras": [],
