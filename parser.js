@@ -47,7 +47,12 @@ arc_events: Did any tracked canon event fire, get altered, or get skipped?
   Format: { "event_id": "fired-canon" | "fired-altered" | "skipped" }
 
 new_npcs: Were any new named characters introduced not yet in the tracker?
-  Format: [{ "display_name": "", "alias": "", "faction": "", "first_appeared": "" }]
+  Format: [{ "display_name": "", "alias": "", "aliases": [], "faction": "", "first_appeared": "" }]
+
+npc_aliases: Did any NPC reveal, adopt, or lose a name or alias in this response?
+  This includes: taking a new cape name, civilian name revealed, old villain name referenced, going by a different identity.
+  Format: { "npc_filename.json": { "alias": "primary cape name", "aliases": ["all known names including old ones"] } }
+  Only include if there's a concrete in-scene reason (e.g. Taylor publicly becomes Weaver, Armsmaster is called Defiant for the first time, an NPC's real name is revealed).
 
 world_state: Any city-level changes (territorial shifts, public cape knowledge updates, new active situations)?
   Format: { "field_name": newValue }
