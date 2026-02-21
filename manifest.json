@@ -1,0 +1,10 @@
+{
+  "display_name": "Worm State Tracker",
+  "version": "0.1.0",
+  "description": "Tracks NPC knowledge states, canon events, and timeline divergence for Worm roleplay scenarios via GitHub Gist.",
+  "author": "LO",
+  "homePage": "",
+  "requires_extras": [],
+  "js": "index.js",
+  "css": "style.css"
+}
