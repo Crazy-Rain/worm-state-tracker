@@ -3,6 +3,22 @@
 #worm_tracker_panel {
   margin-top: 8px;
   font-size: 0.9em;
+  /* Ensure the expanding panel isn't clipped by its container */
+  position: relative;
+  z-index: 1;
+}
+
+/* ST's inline-drawer-content needs to be able to grow freely */
+#worm_tracker_panel .inline-drawer-content {
+  overflow: visible !important;
+  position: relative;
+  z-index: 10;
+}
+
+/* The outer drawer wrapper too */
+#worm_tracker_panel .inline-drawer {
+  overflow: visible !important;
+  position: relative;
 }
 
 /* ── Header ─────────────────────────────────────────────────── */
@@ -187,8 +203,9 @@
   flex-direction: column;
   gap: 6px;
   margin-top: 4px;
-  /* vh-based so it never overflows the visible screen */
-  max-height: 45vh;
+  /* Capped height so it doesn't push content off-screen.
+     Scroll is inside this element, not the drawer. */
+  max-height: 35vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-right: 2px;
