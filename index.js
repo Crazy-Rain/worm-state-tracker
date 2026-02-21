@@ -804,17 +804,6 @@ function buildPanel() {
       </div>
     </div>
   `;
-
-  // Drawer toggle
-  panel.querySelector('.inline-drawer-toggle').addEventListener('click', () => {
-    const content = panel.querySelector('.inline-drawer-content');
-    const icon    = panel.querySelector('.inline-drawer-icon');
-    const isOpen  = content.style.display !== 'none';
-    content.style.display = isOpen ? 'none' : 'block';
-    icon.classList.toggle('up', !isOpen);
-    icon.classList.toggle('down', isOpen);
-  });
-
   // Save config
   panel.querySelector('#wt_save').addEventListener('click', () => {
     const token  = panel.querySelector('#wt_token').value.trim();
