@@ -20,8 +20,18 @@ import {
 const MODULE        = 'worm_tracker';
 const PANEL_ID      = 'worm_tracker_panel';
 const STORE_PREFIX  = 'worm_tracker_';
-const MAX_NPCS      = 8;
 const SCAN_DEPTH    = 3;
+const DEFAULT_MAX_NPCS = 8;
+
+// Runtime — read from localStorage so the panel input persists across sessions
+function getMaxNpcs() {
+  return parseInt(localStorage.getItem(`${STORE_PREFIX}max_npcs`) || DEFAULT_MAX_NPCS, 10) || DEFAULT_MAX_NPCS;
+}
+function setMaxNpcs(n) {
+  const clamped = Math.max(1, Math.min(30, parseInt(n, 10) || DEFAULT_MAX_NPCS));
+  localStorage.setItem(`${STORE_PREFIX}max_npcs`, clamped);
+  return clamped;
+}
 const PUSH_DELAY_MS = 8000;
 
 // ── Session state ─────────────────────────────────────────────
@@ -117,7 +127,23 @@ function renderNpcToText(npc) {
     `[NPC: ${npc.display_name.toUpperCase()}${alias} | ${npc.faction || 'Unknown'} | ${npc.classification || ''}]`
   ];
 
-  if (npc.physical_description) lines.push(`Physical: ${npc.physical_description}`);
+  // ── Appearance — structured fields take priority over flat string ──
+  const app = npc.appearance;
+  if (app && typeof app === 'object' && Object.keys(app).length) {
+    const appLines = [];
+    if (app.height)              appLines.push(app.height);
+    if (app.build)               appLines.push(app.build);
+    if (app.face)                appLines.push(`Face: ${app.face}`);
+    if (app.hair)                appLines.push(`Hair: ${app.hair}`);
+    if (app.eyes)                appLines.push(`Eyes: ${app.eyes}`);
+    if (app.body_detail)         appLines.push(`Body: ${app.body_detail}`);
+    if (app.distinguishing_marks) appLines.push(`Marks: ${app.distinguishing_marks}`);
+    if (app.clothing_style)      appLines.push(`Style: ${app.clothing_style}`);
+    if (appLines.length) lines.push(`Appearance: ${appLines.join('. ')}`);
+  } else if (npc.physical_description) {
+    // Backwards-compat flat string
+    lines.push(`Appearance: ${npc.physical_description}`);
+  }
 
   if (npc.power) {
     const p = npc.power;
@@ -197,7 +223,7 @@ function selectRelevantNpcs() {
     .map(npc => ({ npc, score: scoreNpc(npc, recentText) }))
     .filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_NPCS)
+    .slice(0, getMaxNpcs())
     .map(x => x.npc);
 }
 
@@ -748,7 +774,7 @@ function buildPanel() {
 
       <div class="inline-drawer-content" style="display:none;">
 
-        <!-- PAT + Gist ID -->
+        <!-- PAT + Gist ID + Max NPCs -->
         <div class="wt-section">
           <div class="wt-row">
             <label class="wt-label">GitHub PAT</label>
@@ -760,10 +786,38 @@ function buildPanel() {
             <input id="wt_gist_id" type="text" class="wt-input"
               placeholder="a1b2c3d4e5f6…" value="${gistId || ''}">
           </div>
+          <div class="wt-row wt-row--inline">
+            <label class="wt-label">Max NPCs injected</label>
+            <input id="wt_max_npcs" type="number" class="wt-input wt-input--narrow"
+              min="1" max="30" value="${getMaxNpcs()}"
+              title="How many NPCs to inject per prompt (1–30)">
+          </div>
           <div class="wt-actions">
             <button id="wt_save"     class="menu_button wt-btn">Save</button>
             <button id="wt_sync"     class="menu_button wt-btn">↺ Sync</button>
             <button id="wt_new_gist" class="menu_button wt-btn">+ New Gist</button>
+          </div>
+        </div>
+
+        <hr class="wt-divider">
+
+        <!-- Known Secrets editor -->
+        <div class="wt-secrets-section">
+          <div class="wt-secrets-header" id="wt_secrets_toggle">
+            <span>🔍 PC Knowledge</span>
+            <span class="wt-secrets-caret">▼</span>
+          </div>
+          <div class="wt-secrets-body" id="wt_secrets_body" style="display:none;">
+            <div class="wt-secrets-hint">
+              What Taylor currently knows. Toggle ✓/✗ to flip, × to delete, or add a new entry below.
+              Changes save to Gist automatically.
+            </div>
+            <div id="wt_secrets_list" class="wt-secrets-list"></div>
+            <div class="wt-secrets-add">
+              <input id="wt_secret_new" type="text" class="wt-input"
+                placeholder="new_secret_key (use_underscores)">
+              <button id="wt_secret_add" class="menu_button wt-btn wt-btn-accept">+ Add</button>
+            </div>
           </div>
         </div>
 
@@ -806,11 +860,22 @@ function buildPanel() {
   `;
   // Save config
   panel.querySelector('#wt_save').addEventListener('click', () => {
-    const token  = panel.querySelector('#wt_token').value.trim();
-    const newGid = panel.querySelector('#wt_gist_id').value.trim();
+    const token   = panel.querySelector('#wt_token').value.trim();
+    const newGid  = panel.querySelector('#wt_gist_id').value.trim();
+    const maxN    = panel.querySelector('#wt_max_npcs').value;
     if (token)  setToken(token);
     if (newGid && currentChatId) { gistId = newGid; setGistForChat(currentChatId, newGid); }
+    if (maxN)   setMaxNpcs(maxN);
     updateStatus('config saved ✓');
+    rebuildContextInjection(); // re-select NPCs with new cap
+  });
+
+  // Max NPCs — also applies immediately on blur without requiring Save
+  panel.querySelector('#wt_max_npcs').addEventListener('change', (e) => {
+    const n = setMaxNpcs(e.target.value);
+    e.target.value = n; // reflect clamped value
+    rebuildContextInjection();
+    updatePanelSummary();
   });
 
   // Sync
@@ -855,11 +920,97 @@ function buildPanel() {
   });
 
   // Bulk actions
+  // ── Known secrets editor ────────────────────────────────────
+  panel.querySelector('#wt_secrets_toggle').addEventListener('click', () => {
+    const body  = panel.querySelector('#wt_secrets_body');
+    const caret = panel.querySelector('.wt-secrets-caret');
+    const open  = body.style.display !== 'none';
+    body.style.display  = open ? 'none' : 'block';
+    caret.textContent   = open ? '▼' : '▲';
+    if (!open) renderSecretsPanel();
+  });
+
+  panel.querySelector('#wt_secret_add').addEventListener('click', () => {
+    const input = panel.querySelector('#wt_secret_new');
+    const rawKey = input.value.trim().replace(/\s+/g, '_').toLowerCase();
+    if (!rawKey) return;
+    const ws = gistFiles['world_state.json'];
+    if (!ws) { updateStatus('no world_state loaded'); return; }
+    ws.known_secrets = ws.known_secrets || {};
+    ws.known_secrets[rawKey] = true;
+    input.value = '';
+    persistLocal();
+    schedulePushToGist();
+    rebuildContextInjection();
+    renderSecretsPanel();
+    updateStatus(`added secret: ${rawKey}`);
+  });
+
+  // Enter key on the add input triggers add
+  panel.querySelector('#wt_secret_new').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') panel.querySelector('#wt_secret_add').click();
+  });
+
   panel.querySelector('#wt_accept_all').addEventListener('click', acceptAll);
   panel.querySelector('#wt_deny_all').addEventListener('click', denyAll);
 
   $('#extensions_settings').append(panel);
 }
+
+// ── Secrets panel renderer ────────────────────────────────────
+function renderSecretsPanel() {
+  const listEl = document.getElementById('wt_secrets_list');
+  if (!listEl) return;
+  const ws = gistFiles['world_state.json'];
+  const secrets = ws?.known_secrets;
+
+  if (!secrets || !Object.keys(secrets).length) {
+    listEl.innerHTML = '<div class="wt-secrets-empty">No secrets tracked yet.</div>';
+    return;
+  }
+
+  listEl.innerHTML = Object.entries(secrets).map(([key, val]) => {
+    const isTrue = val === true;
+    const label  = key.replace(/_/g, ' ');
+    return `
+      <div class="wt-secret-row" data-key="${escapeHtml(key)}">
+        <button class="wt-secret-toggle ${isTrue ? 'wt-secret-true' : 'wt-secret-false'}"
+                data-key="${escapeHtml(key)}" title="Toggle known/unknown">
+          ${isTrue ? '✓' : '✗'}
+        </button>
+        <span class="wt-secret-label">${escapeHtml(label)}</span>
+        <button class="wt-secret-delete" data-key="${escapeHtml(key)}" title="Delete">×</button>
+      </div>`;
+  }).join('');
+
+  listEl.querySelectorAll('.wt-secret-toggle').forEach(btn =>
+    btn.addEventListener('click', e => {
+      const key = e.currentTarget.dataset.key;
+      const ws  = gistFiles['world_state.json'];
+      if (!ws?.known_secrets) return;
+      ws.known_secrets[key] = !ws.known_secrets[key];
+      persistLocal();
+      schedulePushToGist();
+      rebuildContextInjection();
+      renderSecretsPanel();
+    })
+  );
+
+  listEl.querySelectorAll('.wt-secret-delete').forEach(btn =>
+    btn.addEventListener('click', e => {
+      const key = e.currentTarget.dataset.key;
+      const ws  = gistFiles['world_state.json'];
+      if (!ws?.known_secrets) return;
+      delete ws.known_secrets[key];
+      persistLocal();
+      schedulePushToGist();
+      rebuildContextInjection();
+      renderSecretsPanel();
+      updateStatus(`removed secret: ${key}`);
+    })
+  );
+}
+
 
 function renderQueuePanel() {
   const queueEl  = document.getElementById('wt_queue');
