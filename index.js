@@ -367,6 +367,92 @@ async function onMessageReceived() {
   }
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+// 5b. MANUAL RESCAN — scan previous AI messages sequentially
+// ═══════════════════════════════════════════════════════════════
+
+let isRescanning = false;
+let rescanAbort  = false;
+
+async function rescanHistory(count = 10) {
+  if (isRescanning || isExtracting) {
+    updateStatus('already scanning — please wait');
+    return;
+  }
+  if (!gistFiles['world_state.json']) {
+    updateStatus('no world_state loaded — sync first');
+    return;
+  }
+
+  const ctx = getContext();
+  const messages = ctx?.chat;
+  if (!messages?.length) { updateStatus('no chat history found'); return; }
+
+  // Collect AI messages in reverse order (newest first) up to `count`
+  const aiMessages = [];
+  for (let i = messages.length - 1; i >= 0 && aiMessages.length < count; i--) {
+    const msg = messages[i];
+    if (!msg || msg.is_user) continue;
+    const text = stripThinkingBlocks(msg.mes || '');
+    if (text) aiMessages.push({ text, idx: i });
+  }
+
+  if (!aiMessages.length) { updateStatus('no AI messages to scan'); return; }
+
+  // Reverse so we process oldest→newest (state builds correctly)
+  aiMessages.reverse();
+
+  isRescanning = true;
+  rescanAbort  = false;
+  const scanBtn = document.getElementById('wt_rescan_btn');
+  if (scanBtn) { scanBtn.textContent = '⏹ Stop'; scanBtn.dataset.scanning = '1'; }
+
+  let found = 0;
+  for (let i = 0; i < aiMessages.length; i++) {
+    if (rescanAbort) {
+      updateStatus(`rescan stopped at message ${i}/${aiMessages.length} — ${found} change(s) queued`);
+      break;
+    }
+
+    updateStatus(`scanning message ${i + 1}/${aiMessages.length}…`);
+
+    try {
+      const prompt = buildExtractionPrompt(aiMessages[i].text, {
+        world_state:  worldState(),
+        master_index: masterIndex(),
+        arc_events:   arcEvents(),
+        active_npcs:  allNpcFiles().map(n => ({
+          file:          Object.entries(gistFiles).find(([, v]) => v === n)?.[0],
+          display_name:  n.display_name,
+          alias:         n.alias,
+          current_state: n.current_state,
+          knowledge:     n.knowledge
+        }))
+      });
+      const raw   = await runExtractionCall(prompt);
+      const delta = parseDelta(raw);
+      if (!deltaIsEmpty(delta)) { proposeDelta(delta); found++; }
+    } catch (err) {
+      console.error(`[WormTracker] Rescan error on msg ${i}:`, err);
+      updateStatus(`scan error (msg ${i + 1}): ${err.message} — continuing…`);
+    }
+
+    // Delay between calls — avoids rate-limit / "too many responses" errors
+    if (i < aiMessages.length - 1 && !rescanAbort) {
+      await new Promise(r => setTimeout(r, 1800));
+    }
+  }
+
+  isRescanning = false;
+  if (scanBtn) { scanBtn.textContent = '🔍 Rescan History'; delete scanBtn.dataset.scanning; }
+  if (!rescanAbort) {
+    updateStatus(found
+      ? `rescan complete — ${found} change(s) queued for review`
+      : 'rescan complete — no new changes detected');
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 6. APPROVE/DENY QUEUE — extracted deltas
 // ═══════════════════════════════════════════════════════════════
@@ -528,12 +614,20 @@ function proposeDelta(delta) {
       description: `Divergence +${delta.divergence_delta} (${cur} → ${cur + delta.divergence_delta})`,
       oldValue: cur, newValue: cur + delta.divergence_delta,
       applyFn: () => {
-        const ws = gistFiles['world_state.json'] || {};
-        ws.divergence = ws.divergence || { rating: 0, threshold: 15, timeline_reliable: true, logged: [] };
-        ws.divergence.rating += delta.divergence_delta;
-        ws.divergence.logged.push({ timestamp: new Date().toISOString(), delta: delta.divergence_delta });
-        if (ws.divergence.rating >= ws.divergence.threshold) ws.divergence.timeline_reliable = false;
+        const ws = gistFiles['world_state.json'];
+        if (!ws) { console.error('[WormTracker] divergence applyFn: world_state.json not in gistFiles'); return; }
+        if (!ws.divergence) ws.divergence = { rating: 0, threshold: 15, timeline_reliable: true, logged_divergences: [] };
+        ws.divergence.rating = (ws.divergence.rating || 0) + delta.divergence_delta;
+        // support both old ('logged') and new ('logged_divergences') field names
+        const logArr = ws.divergence.logged_divergences ?? ws.divergence.logged;
+        if (Array.isArray(logArr)) {
+          logArr.push({ timestamp: new Date().toISOString(), delta: delta.divergence_delta });
+        } else {
+          ws.divergence.logged_divergences = [{ timestamp: new Date().toISOString(), delta: delta.divergence_delta }];
+        }
+        if (ws.divergence.rating >= (ws.divergence.threshold || 15)) ws.divergence.timeline_reliable = false;
         gistFiles['world_state.json'] = ws;
+        console.log('[WormTracker] divergence applied — new rating:', ws.divergence.rating);
       }
     });
   }
@@ -732,7 +826,14 @@ function readFileAsText(file) {
 function acceptChange(id) {
   const idx = pendingQueue.findIndex(item => item.id === id);
   if (idx === -1) return;
-  pendingQueue[idx].applyFn();
+  try {
+    pendingQueue[idx].applyFn();
+  } catch (err) {
+    console.error('[WormTracker] acceptChange applyFn threw:', err);
+    updateStatus(`apply error: ${err.message} — change kept in queue`);
+    renderQueuePanel();
+    return;   // leave item in queue so user can see it failed
+  }
   pendingQueue.splice(idx, 1);
   persistLocal();
   rebuildContextInjection();
@@ -841,7 +942,7 @@ function buildPanel() {
           </div>
           <div class="wt-secrets-body" id="wt_secrets_body" style="display:none;">
             <div class="wt-secrets-hint">
-              What Taylor currently knows. Toggle ✓/✗ to flip, × to delete, or add a new entry below.
+              What the PC currently knows. Toggle ✓/✗ to flip, × to delete, or add a new entry below.
               Changes save to Gist automatically.
             </div>
             <div id="wt_secrets_list" class="wt-secrets-list"></div>
@@ -870,6 +971,27 @@ function buildPanel() {
         </div>
 
         <hr class="wt-divider">
+
+
+        <hr class="wt-divider">
+
+        <!-- Rescan section -->
+        <div class="wt-rescan-section">
+          <div class="wt-row wt-row--inline">
+            <label class="wt-label">Rescan last</label>
+            <input id="wt_rescan_depth" type="number" class="wt-input wt-input--narrow"
+              min="1" max="50" value="10"
+              title="How many previous AI messages to scan (1–50)">
+            <span class="wt-label" style="margin-left:4px">messages</span>
+          </div>
+          <div class="wt-actions">
+            <button id="wt_rescan_btn" class="menu_button wt-btn wt-btn-neutral">🔍 Rescan History</button>
+          </div>
+          <p class="wt-import-hint">
+            Re-runs extraction on previous AI responses. Useful after API errors or accidental denials.
+            Sequential — waits between calls to avoid rate limits.
+          </p>
+        </div>
 
         <!-- Status + summary -->
         <div id="wt_status"  class="wt-status">idle</div>
@@ -949,6 +1071,19 @@ function buildPanel() {
       await handleFileImport(e.target.files);
       e.target.value = ''; // reset so re-selecting same file triggers change again
     }
+  });
+
+
+  // Rescan history button
+  panel.querySelector('#wt_rescan_btn').addEventListener('click', async () => {
+    const btn = panel.querySelector('#wt_rescan_btn');
+    if (btn.dataset.scanning) {
+      // Already scanning — this click stops it
+      rescanAbort = true;
+      return;
+    }
+    const depth = parseInt(panel.querySelector('#wt_rescan_depth').value, 10) || 10;
+    await rescanHistory(depth);
   });
 
   // Bulk actions
