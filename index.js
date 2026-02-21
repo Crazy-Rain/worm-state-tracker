@@ -425,6 +425,38 @@ function proposeDelta(delta) {
   }
 
   // NPC alias updates — cape name changes, identity reveals, new names adopted
+  // NPC appearance — AI described someone concretely, propose updating appearance fields
+  if (delta.npc_appearance) {
+    for (const [file, appData] of Object.entries(delta.npc_appearance)) {
+      const npc  = gistFiles[file];
+      const name = npc?.display_name || file.replace(/npc_|\.json/g, '').replace(/_/g, ' ');
+      const old  = npc?.appearance || {};
+
+      // Only include fields that are actually new or changed
+      const changedFields = Object.entries(appData).filter(([k, v]) => v && v !== old[k]);
+      if (!changedFields.length) continue;
+
+      const summary = changedFields.map(([k, v]) =>
+        `${k}: ${String(v).slice(0, 60)}${v.length > 60 ? '…' : ''}`
+      ).join(' | ');
+
+      newItems.push({
+        id: uid(), type: 'npc_appearance', npcFile: file,
+        description: `${name}: appearance — ${summary}`,
+        oldValue: { ...old },
+        newValue: appData,
+        applyFn: () => {
+          if (!gistFiles[file]) gistFiles[file] = {};
+          gistFiles[file].appearance = Object.assign(
+            {}, gistFiles[file].appearance || {}, appData
+          );
+          // Remove old flat field if it existed
+          delete gistFiles[file].physical_description;
+        }
+      });
+    }
+  }
+
   if (delta.npc_aliases) {
     for (const [file, aliasData] of Object.entries(delta.npc_aliases)) {
       const npc  = gistFiles[file];
