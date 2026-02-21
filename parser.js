@@ -94,6 +94,144 @@ export async function runExtractionCall(prompt) {
   throw new Error('generateQuietPrompt not available — check SillyTavern version compatibility.');
 }
 
+
+// ── Extract forge block from raw message text ────────────────
+// The narrator AI already outputs ```forge {...} ``` blocks — parse these
+// directly instead of re-sending the response through the LLM.
+// NOTE: run this on RAW text BEFORE stripThinkingBlocks (which deletes forge blocks).
+export function extractForgeBlock(rawText) {
+  if (!rawText) return null;
+  const match = rawText.match(/```forge\s*([\s\S]*?)```/i);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1].trim());
+  } catch (e) {
+    console.warn('[WormTracker] forge block parse failed:', e.message, '| raw:', match[1].slice(0, 200));
+    return null;
+  }
+}
+
+// ── Normalise a forge block → internal delta format ──────────
+// The card's forge format (npc_state_change, arc_event, world_state…)
+// differs from what proposeDelta expects (npc_current_state, arc_events…).
+// This translates between them, using gistFiles for filename lookups.
+export function normalizeForgeBlock(forgeObj, gistFiles = {}) {
+  if (!forgeObj || typeof forgeObj !== 'object') return null;
+  const delta = {};
+
+  // ── divergence_delta ──────────────────────────────────────
+  if (forgeObj.divergence_delta > 0) {
+    delta.divergence_delta = Number(forgeObj.divergence_delta) || 0;
+  }
+
+  // ── in_world_date (top-level or inside world_state) ───────
+  const newDate = forgeObj.in_world_date
+    ?? forgeObj.world_state?.in_world_date
+    ?? null;
+  if (newDate && typeof newDate === 'string') delta.in_world_date = newDate;
+
+  // ── world_state fields (pass through, exclude in_world_date already handled) ──
+  if (forgeObj.world_state && typeof forgeObj.world_state === 'object') {
+    const ws = { ...forgeObj.world_state };
+    delete ws.in_world_date;
+    if (Object.keys(ws).length) delta.world_state = ws;
+  }
+
+  // ── arc_event (string or object) ─────────────────────────
+  // Card format: "arc_event": "Taylor met the Undersiders"
+  // Internal format: "arc_events": { "event_id": "fired-canon" }
+  if (forgeObj.arc_event && forgeObj.arc_event !== 'null') {
+    const eventKey = typeof forgeObj.arc_event === 'string'
+      ? forgeObj.arc_event.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 40)
+      : 'event_' + Date.now();
+    delta.arc_events = { [eventKey]: 'fired-canon' };
+  }
+
+  // ── npc_updates — NEW expanded format [{name, relationship, emotional_state, physical_state, learned}]
+  // Also handles legacy npc_state_change: {name, change} from old card format
+  const updates = [];
+  if (Array.isArray(forgeObj.npc_updates)) {
+    updates.push(...forgeObj.npc_updates);
+  }
+  // Legacy: npc_state_change (single object or array)
+  const legacyChanges = Array.isArray(forgeObj.npc_state_change)
+    ? forgeObj.npc_state_change
+    : (forgeObj.npc_state_change ? [forgeObj.npc_state_change] : []);
+  for (const lc of legacyChanges) {
+    if (lc?.name) updates.push({ name: lc.name, emotional_state: lc.change || lc.state || '' });
+  }
+
+  for (const upd of updates) {
+    if (!upd?.name) continue;
+    const filename = resolveNpcFilename(upd.name, gistFiles);
+    if (!filename) continue;
+
+    // relationship field
+    if (upd.relationship) {
+      delta.npc_relationship = delta.npc_relationship || {};
+      delta.npc_relationship[filename] = upd.relationship;
+    }
+
+    // emotional_state and/or physical_state → npc_current_state
+    if (upd.emotional_state || upd.physical_state) {
+      delta.npc_current_state = delta.npc_current_state || {};
+      delta.npc_current_state[filename] = delta.npc_current_state[filename] || {};
+      if (upd.emotional_state) delta.npc_current_state[filename].emotional_state = upd.emotional_state;
+      if (upd.physical_state)  delta.npc_current_state[filename].physical_state  = upd.physical_state;
+    }
+
+    // learned → npc_knowledge
+    if (upd.learned) {
+      delta.npc_knowledge = delta.npc_knowledge || {};
+      delta.npc_knowledge[filename] = delta.npc_knowledge[filename] || {};
+      // Key by timestamp slug so multiple learns don't overwrite each other
+      const key = 'learned_' + Date.now();
+      delta.npc_knowledge[filename][key] = upd.learned;
+    }
+  }
+
+  // ── npc_knowledge (pass through if already in correct format) ─
+  if (forgeObj.npc_knowledge) {
+    delta.npc_knowledge = delta.npc_knowledge || {};
+    Object.assign(delta.npc_knowledge, forgeObj.npc_knowledge);
+  }
+
+  // ── npc_relationship (direct key, if present alongside npc_updates) ─
+  if (forgeObj.npc_relationship) {
+    delta.npc_relationship = delta.npc_relationship || {};
+    Object.assign(delta.npc_relationship, forgeObj.npc_relationship);
+  }
+
+  // ── new_npcs ─────────────────────────────────────────────
+  if (Array.isArray(forgeObj.new_npcs)) delta.new_npcs = forgeObj.new_npcs;
+
+  return delta;
+}
+
+// ── Resolve NPC name → Gist filename ─────────────────────────
+// Fuzzy-matches a display name, alias, or cape name to an npc_*.json key.
+function resolveNpcFilename(name, gistFiles) {
+  if (!name || typeof name !== 'string') return null;
+  const n = name.toLowerCase().trim();
+
+  // Exact filename match
+  const exactKey = 'npc_' + n.replace(/\s+/g, '_') + '.json';
+  if (gistFiles[exactKey]) return exactKey;
+
+  // Match against display_name, alias, or any entry in aliases[]
+  for (const [filename, file] of Object.entries(gistFiles)) {
+    if (!filename.startsWith('npc_')) continue;
+    if (!file || typeof file !== 'object') continue;
+    const candidates = [
+      file.display_name,
+      file.alias,
+      ...(Array.isArray(file.aliases) ? file.aliases : [])
+    ].filter(Boolean).map(s => s.toLowerCase());
+    if (candidates.some(c => c.includes(n) || n.includes(c))) return filename;
+  }
+  return null;
+}
+
 // ── Parse the delta response ─────────────────────────────────
 export function parseDelta(rawText) {
   if (!rawText || typeof rawText !== 'string') return null;
