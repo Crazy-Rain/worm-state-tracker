@@ -621,3 +621,13 @@
 
   .wt-queue-bulk .wt-btn { flex: 1; }
 }
+
+/* Rescan section */
+.wt-rescan-section {
+  padding: 6px 0 2px;
+}
+.wt-rescan-section .wt-row--inline {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
