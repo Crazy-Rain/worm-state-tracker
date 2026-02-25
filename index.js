@@ -42,6 +42,7 @@ let pendingQueue    = [];     // { id, type, ... description, applyFn, expanded?
 let lastMessageText = '';
 let isExtracting    = false;
 let syncTimer       = null;
+let extensionEnabled = localStorage.getItem('worm_tracker_enabled') !== 'false';
 
 // ── Accessors ─────────────────────────────────────────────────
 const worldState  = () => gistFiles['world_state.json']   || {};
@@ -254,6 +255,14 @@ function injectNpcs() {
 }
 
 function rebuildContextInjection() {
+  const ctx = getContext();
+  if (!extensionEnabled) {
+    if (ctx?.setExtensionPrompt) {
+      ctx.setExtensionPrompt(`${MODULE}_world`, '', 1, 0, false, null);
+      ctx.setExtensionPrompt(`${MODULE}_npcs`,  '', 1, 0, false, null);
+    }
+    return;
+  }
   injectWorldState();
   injectNpcs();
 }
@@ -331,6 +340,7 @@ async function onMessageReceived() {
   if (!messages?.length) return;
   const lastMsg = messages[messages.length - 1];
   if (!lastMsg || lastMsg.is_user) return;
+  if (!extensionEnabled) return;
 
   const rawText   = lastMsg.mes || '';
   const cleanText = stripThinkingBlocks(rawText);
@@ -979,6 +989,10 @@ function buildPanel() {
       <div class="inline-drawer-toggle inline-drawer-header wt-header">
         <b>🕷 Worm State Tracker</b>
         <span id="wt_badge" class="wt-badge" style="display:none">0</span>
+        <label class="wt-toggle" id="wt_enabled_toggle" title="Enable / disable tracker" onclick="event.stopPropagation()">
+          <input type="checkbox" id="wt_enabled_cb">
+          <span class="wt-toggle-pill"></span>
+        </label>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
 
@@ -1205,6 +1219,17 @@ function buildPanel() {
 
   panel.querySelector('#wt_accept_all').addEventListener('click', acceptAll);
   panel.querySelector('#wt_deny_all').addEventListener('click', denyAll);
+
+  // Enabled toggle
+  const enabledCb = panel.querySelector('#wt_enabled_cb');
+  if (enabledCb) enabledCb.checked = extensionEnabled;
+  panel.querySelector('#wt_enabled_toggle')?.addEventListener('click', () => {
+    extensionEnabled = !extensionEnabled;
+    localStorage.setItem('worm_tracker_enabled', extensionEnabled);
+    enabledCb.checked = extensionEnabled;
+    rebuildContextInjection();
+    updateStatus(extensionEnabled ? 'tracker enabled \u2713' : 'tracker disabled \u2014 injections cleared');
+  });
 
   $('#extensions_settings').append(panel);
 }
@@ -1446,6 +1471,9 @@ function registerEventHooks() {
 jQuery(async () => {
   console.log('[WormTracker] Loading v0.4.0…');
   buildPanel();
+  // Restore enabled toggle state
+  const _ecb = document.getElementById('wt_enabled_cb');
+  if (_ecb) _ecb.checked = extensionEnabled;
   registerEventHooks();
 
   const ctx = getContext();
