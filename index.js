@@ -7,7 +7,7 @@
 
 import { getContext } from '../../../extensions.js';
 import {
-  getToken, setToken, setGistForChat, getGistIdForChat,
+  getToken, setToken, setGistForChat, getGistIdForChat, getLastGistId,
   fetchGistFiles, updateGistFiles, createGist,
   scaffoldNpcFile, defaultIndex, defaultWorldState, defaultArcEvents
 } from './gist.js';
@@ -290,6 +290,9 @@ function loadLocal() {
     if (Date.now() - data.timestamp > 86_400_000) return false;
     gistId    = data.gistId;
     gistFiles = data.gistFiles;
+    // Populate the panel input so user can see the restored ID
+    const inp = document.getElementById('wt_gist_id');
+    if (inp && gistId) inp.value = gistId;
     return true;
   } catch { return false; }
 }
@@ -1492,6 +1495,15 @@ jQuery(async () => {
       updatePanelSummary();
     } else if (gistId) {
       await syncFromGist();
+    }
+  } else {
+    // chatId not available yet — use global fallback
+    const lastId = getLastGistId();
+    if (lastId) {
+      gistId = lastId;
+      const inp = document.getElementById('wt_gist_id');
+      if (inp) inp.value = lastId;
+      updateStatus('Gist ID restored — waiting for chat to load');
     }
   }
 
