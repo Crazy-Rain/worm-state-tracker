@@ -4,6 +4,7 @@
 
 const GIST_TOKEN_KEY = 'worm_tracker_gist_token';
 const GIST_MAP_KEY   = 'worm_tracker_chat_gist_map';
+const LAST_GIST_KEY  = 'worm_tracker_last_gist_id';  // global fallback — survives page refresh
 
 // ── Token storage ────────────────────────────────────────────
 export function getToken() {
@@ -25,10 +26,19 @@ export function setGistForChat(chatId, gistId) {
   const map = getChatGistMap();
   map[chatId] = gistId;
   localStorage.setItem(GIST_MAP_KEY, JSON.stringify(map));
+  // Always update global fallback so page refresh gets the last used ID
+  localStorage.setItem(LAST_GIST_KEY, gistId);
 }
 
 export function getGistIdForChat(chatId) {
-  return getChatGistMap()[chatId] || null;
+  const perChat = getChatGistMap()[chatId];
+  if (perChat) return perChat;
+  // Fall back to last globally used ID — covers refresh before chatId is known
+  return localStorage.getItem(LAST_GIST_KEY) || null;
+}
+
+export function getLastGistId() {
+  return localStorage.getItem(LAST_GIST_KEY) || null;
 }
 
 // ── Fetch all files from a Gist ──────────────────────────────
